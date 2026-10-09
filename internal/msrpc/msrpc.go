@@ -411,12 +411,9 @@ func (c NetShareEnumAllResponseDecoder) ShareInfoList() []ShareInfo {
 	switch level {
 	case 1:
 		offset := 48 + count*12
-
 		for i := 0; i < count; i++ {
-
-			shareType := le.Uint32(
-				c[offset : offset+4],
-			)
+			recordOffset := 48 + i*12
+			shareType := le.Uint32(c[recordOffset+4 : recordOffset+8])
 
 			{
 				noff := int(
@@ -424,7 +421,7 @@ func (c NetShareEnumAllResponseDecoder) ShareInfoList() []ShareInfo {
 				)
 
 				nlen := int(
-					le.Uint32(c[offset+8 : offset+12]),
+					le.Uint32(c[offset+8:offset+12]),
 				) * 2
 
 				shares[i].Name =
@@ -444,7 +441,7 @@ func (c NetShareEnumAllResponseDecoder) ShareInfoList() []ShareInfo {
 				)
 
 				clen := int(
-					le.Uint32(c[offset+8 : offset+12]),
+					le.Uint32(c[offset+8:offset+12]),
 				) * 2
 
 				shares[i].Comment =
