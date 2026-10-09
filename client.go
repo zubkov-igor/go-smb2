@@ -72,6 +72,12 @@ func (d *Dialer) DialContext(ctx context.Context, tcpConn net.Conn) (*Session, e
 	return &Session{s: s, ctx: context.Background(), addr: tcpConn.RemoteAddr().String()}, nil
 }
 
+type ShareInfo struct {
+	Name    string
+	Type    uint32
+	Comment string
+}
+
 // Session represents a SMB session.
 type Session struct {
 	s    *session
@@ -112,6 +118,138 @@ func (c *Session) Mount(sharename string) (*Share, error) {
 	}
 
 	return &Share{treeConn: tc, ctx: context.Background()}, nil
+}
+
+func (c *Session) ListShares() ([]ShareInfo, error) {
+	servername := c.addr
+
+	fs, err := c.Mount(fmt.Sprintf(`\\%s\IPC$`, servername))
+	if err != nil {
+		return nil, err
+	}
+	defer fs.Umount()
+
+	fs = fs.WithContext(c.ctx)
+
+	f, err := fs.OpenFile("srvsvc", os.O_RDWR, 0666)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	callId := rand.Uint32()
+
+	bindReq := &IoctlRequest{
+		CtlCode:           FSCTL_PIPE_TRANSCEIVE,
+		OutputOffset:      0,
+		OutputCount:       0,
+		MaxInputResponse:  0,
+		MaxOutputResponse: 4280,
+		Flags:             SMB2_0_IOCTL_IS_FSCTL,
+		Input: &msrpc.Bind{
+			CallId: callId,
+		},
+	}
+
+	output, err := f.ioctl(bindReq)
+	if err != nil {
+		return nil, &os.PathError{Op: "listSharenames", Path: f.name, Err: err}
+	}
+
+	r1 := msrpc.BindAckDecoder(output)
+	if r1.IsInvalid() || r1.CallId() != callId {
+		return nil, &os.PathError{Op: "listSharenames", Path: f.name, Err: &InvalidResponseError{"broken bind ack response format"}}
+	}
+
+	callId++
+
+	reqReq := &IoctlRequest{
+		CtlCode:          FSCTL_PIPE_TRANSCEIVE,
+		OutputOffset:     0,
+		OutputCount:      0,
+		MaxInputResponse: 0,
+		// MaxOutputResponse: 4280,
+		MaxOutputResponse: 1024,
+		Flags:             SMB2_0_IOCTL_IS_FSCTL,
+		Input: &msrpc.NetShareEnumAllRequest{
+			CallId:     callId,
+			ServerName: servername,
+			Level:      1, // level 1 seems to be portable
+		},
+	}
+
+	output, err = f.ioctl(reqReq)
+	if err != nil {
+		if rerr, ok := err.(*ResponseError); ok && NtStatus(rerr.Code) == STATUS_BUFFER_OVERFLOW {
+			buf := make([]byte, 4280)
+
+			rlen := 4280 - len(output)
+
+			n, err := f.readAt(buf[:rlen], 0)
+			if err != nil {
+				return nil, &os.PathError{Op: "listSharenames", Path: f.name, Err: err}
+			}
+
+			output = append(output, buf[:n]...)
+
+			r2 := msrpc.NetShareEnumAllResponseDecoder(output)
+			if r2.IsInvalid() || r2.CallId() != callId {
+				return nil, &os.PathError{Op: "listSharenames", Path: f.name, Err: &InvalidResponseError{"broken net share enum response format"}}
+			}
+
+			for r2.IsIncomplete() {
+				n, err := f.readAt(buf, 0)
+				if err != nil {
+					return nil, &os.PathError{Op: "listSharenames", Path: f.name, Err: err}
+				}
+
+				r3 := msrpc.NetShareEnumAllResponseDecoder(buf[:n])
+				if r3.IsInvalid() || r3.CallId() != callId {
+					return nil, &os.PathError{Op: "listSharenames", Path: f.name, Err: &InvalidResponseError{"broken net share enum response format"}}
+				}
+
+				output = append(output, r3.Buffer()...)
+
+				r2 = msrpc.NetShareEnumAllResponseDecoder(output)
+			}
+
+			shares := r2.ShareInfoList()
+
+			result := make([]ShareInfo, len(shares))
+
+			for i, share := range shares {
+				result[i] = ShareInfo{
+					Name:    share.Name,
+					Type:    share.Type,
+					Comment: share.Comment,
+				}
+			}
+
+			return result, nil
+		}
+
+		return nil, &os.PathError{Op: "listSharenames", Path: f.name, Err: err}
+	}
+
+	r2 := msrpc.NetShareEnumAllResponseDecoder(output)
+	if r2.IsInvalid() || r2.IsIncomplete() || r2.CallId() != callId {
+		return nil, &os.PathError{Op: "listSharenames", Path: f.name, Err: &InvalidResponseError{"broken net share enum response format"}}
+	}
+
+	shares := r2.ShareInfoList()
+
+	result := make([]ShareInfo, len(shares))
+
+	for i, share := range shares {
+		result[i] = ShareInfo{
+			Name:    share.Name,
+			Type:    share.Type,
+			Comment: share.Comment,
+		}
+	}
+
+	return result, nil
+
 }
 
 func (c *Session) ListSharenames() ([]string, error) {

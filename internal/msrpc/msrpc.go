@@ -212,6 +212,12 @@ func (r *NetShareEnumAllRequest) Encode(b []byte) {
 	le.PutUint32(b[16:20], uint32(off-24)) // alloc hint
 }
 
+type ShareInfo struct {
+	Name    string
+	Type    uint32
+	Comment string
+}
+
 type NetShareEnumAllResponseDecoder []byte
 
 func (c NetShareEnumAllResponseDecoder) IsInvalid() bool {
@@ -393,4 +399,71 @@ func (c NetShareEnumAllResponseDecoder) ShareNameList() []string {
 	}
 
 	return ss
+}
+
+func (c NetShareEnumAllResponseDecoder) ShareInfoList() []ShareInfo {
+	level := le.Uint32(c[24:28])
+
+	count := int(le.Uint32(c[36:40]))
+
+	shares := make([]ShareInfo, count)
+
+	switch level {
+	case 1:
+		offset := 48 + count*12
+
+		for i := 0; i < count; i++ {
+
+			shareType := le.Uint32(
+				c[offset : offset+4],
+			)
+
+			{
+				noff := int(
+					le.Uint32(c[offset+4 : offset+8]),
+				)
+
+				nlen := int(
+					le.Uint32(c[offset+8 : offset+12]),
+				) * 2
+
+				shares[i].Name =
+					utf16le.DecodeToString(
+						c[offset+12+noff : offset+12+noff+nlen],
+					)
+
+				offset = roundup(
+					offset+12+noff+nlen,
+					4,
+				)
+			}
+
+			{
+				coff := int(
+					le.Uint32(c[offset+4 : offset+8]),
+				)
+
+				clen := int(
+					le.Uint32(c[offset+8 : offset+12]),
+				) * 2
+
+				shares[i].Comment =
+					utf16le.DecodeToString(
+						c[offset+12+coff : offset+12+coff+clen],
+					)
+
+				offset = roundup(
+					offset+12+coff+clen,
+					4,
+				)
+			}
+
+			shares[i].Type = shareType
+		}
+
+	default:
+		return nil
+	}
+
+	return shares
 }
